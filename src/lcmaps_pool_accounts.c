@@ -43,9 +43,10 @@ static char * lockdir = NULL;
 static int min_uid = UID_DEFAULT;
 static int max_uid = UID_DEFAULT;
 
-// Global - the current FD of the lockfile.
+// Global - the current FD and location of the lockfile.
 // Other plugins will use the dynamic loader to find this symbol.
 int lcmaps_pool_accounts_fd = -1;
+char * lcmaps_pool_accounts_lockfile = NULL;
 
 // Open the directory, do basic permission checks.
 // Returns -1 on failure and an open FD on success
@@ -84,8 +85,12 @@ static int open_lockdir() {
 // Given a lock directory file descriptor, iterate through the possible
 // user names and select an unlocked account.
 //
+// On success, account_name and account_lockfile are changed to the name and
+// location of the lockfile, respectively.  The callee is responsible for
+// calling 'free' on the memory.
+//
 // Return -1 on failure.
-int select_account(int dir_fd) {
+int select_account(int dir_fd, char **account_name, char **account_lockfile, int *account_uid, int *account_gid) {
 
   struct passwd *account;
   int uid;
@@ -101,6 +106,7 @@ int select_account(int dir_fd) {
       continue;
     }
     const char * name = account->pw_name;
+    lcmaps_log(4, "%s: Considering mapping to account %s.\n", logstr, name);
     int fd = openat(dir_fd, name, O_WRONLY|O_CREAT|O_EXCL, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
     if (fd == -1) {
       if (errno == EEXIST) {
@@ -131,6 +137,16 @@ int select_account(int dir_fd) {
       lcmaps_log(1, "%s: Locked an existing account file %s; likely means the monitoring process died unexpectedly or misconfiguration.\n", logstr, name);
     }
 
+    *account_name = strdup(name);
+    size_t lockfile_len = strlen(lockdir) + 1 + strlen(name) + 1;
+    *account_lockfile = malloc(lockfile_len);
+    if (!account_name || !account_lockfile) {
+      lcmaps_log(0, "%s: Unable to allocate memory for account name.\n", logstr);
+      return -1;
+    }
+    *account_uid = account->pw_uid;
+    *account_gid = account->pw_gid;
+    sprintf(*account_lockfile, "%s/%s", lockdir, name);
     return fd;
   }
 
@@ -155,19 +171,22 @@ int plugin_initialize(int argc, char **argv)
   lcmaps_pool_accounts_fd = -1;
 
   // Notice that we start at 1, as argv[0] is the plugin name.
-  for (idx=1; idx<argc; argc++) {
-    lcmaps_log_debug(2, "%s: arg %d is %s\n", logstr, idx, argv[idx]);
+  for (idx=1; idx<argc; idx++) {
+    lcmaps_log(2, "%s: arg %d is %s\n", logstr, idx, argv[idx]);
     if ((strncasecmp(argv[idx], MINUID_ARG, strlen(MINUID_ARG)) == 0) && ((idx+1) < argc)) {
       idx++;
-      if ((sscanf(argv[idx], "%d", &min_uid) != 1) || (max_uid < 0)) {
-        lcmaps_log_debug(0, "%s: Unable to convert max UID argument %s to an integer\n", logstr, argv[idx]);
+      if ((sscanf(argv[idx], "%d", &min_uid) != 1) || (min_uid < 0)) {
+        lcmaps_log(0, "%s: Unable to convert min UID argument %s to an integer\n", logstr, argv[idx]);
+        return LCMAPS_MOD_FAIL;
       }
+      lcmaps_log(4, "%s: Min UID: %d.\n", logstr, min_uid);
     } else if ((strncasecmp(argv[idx], MAXUID_ARG, strlen(MAXUID_ARG)) == 0) && ((idx+1) < argc)) {
       idx++;
       if ((sscanf(argv[idx], "%d", &max_uid) != 1) || (max_uid < 0)) {
-        lcmaps_log_debug(0, "%s: Unable to convert max UID argument %s to an integer\n", logstr, argv[idx]);
+        lcmaps_log(0, "%s: Unable to convert max UID argument %s to an integer\n", logstr, argv[idx]);
         return LCMAPS_MOD_FAIL;
       }
+      lcmaps_log(4, "%s: Max UID: %d.\n", logstr, max_uid);
     } else if ((strncasecmp(argv[idx], LOCKPATH_ARG, strlen(LOCKPATH_ARG)) == 0) && ((idx+1) < argc)) {
       idx++;
       lockdir = strdup(argv[idx]);
@@ -175,12 +194,12 @@ int plugin_initialize(int argc, char **argv)
         lcmaps_log(0, "%s: Unable to allocate memory for lockdir\n", logstr);
         return LCMAPS_MOD_FAIL;
       }
+      lcmaps_log(4, "%s: Lock directory: %s.\n", logstr, lockdir);
     } else {
       lcmaps_log(0, "%s: Invalid plugin option: %s\n", logstr, argv[idx]);
       return LCMAPS_MOD_FAIL;
     }
   }
-
   if (lockdir == NULL)
     lockdir = strdup(LOCKPATH_DEFAULT);
   if (lockdir == NULL) {
@@ -206,7 +225,8 @@ int plugin_initialize(int argc, char **argv)
       logstr, MINUID_ARG, MAXUID_ARG);
     return LCMAPS_MOD_FAIL;
   }
-  lcmaps_log(3, "%s: UID pool range: %d-%d, inclusive.\n", min_uid, max_uid);
+
+  lcmaps_log(3, "%s: UID pool range: %d-%d, inclusive.\n", logstr, min_uid, max_uid);
 
   return LCMAPS_MOD_SUCCESS;
 
@@ -257,14 +277,21 @@ int plugin_run(int argc, lcmaps_argument_t *argv)
     goto opendir_failed;
   }
 
-  
-  int new_uid = select_account(dir_fd);
-  if (new_uid == -1) {
+  char * account_name = NULL;
+  char * account_lockfile = NULL;
+  int account_uid = -1;
+  int account_gid = -1;
+  int new_fd = select_account(dir_fd, &account_name, &account_lockfile, &account_uid, &account_gid);
+  if (new_fd == -1) {
     goto select_account_failed;
   }
 
-  lcmaps_log_time(0, "%s: Assigning UID %d to glexec invocation from pool accounts.\n", logstr, new_uid);
-  lcmaps_pool_accounts_fd = new_uid;
+  lcmaps_log_time(0, "%s: Assigning %s to glexec invocation from pool accounts.\n", logstr, account_name);
+  free(account_name);
+  addCredentialData(UID, &account_uid);
+  addCredentialData(PRI_GID, &account_gid);
+  lcmaps_pool_accounts_fd = new_fd;
+  lcmaps_pool_accounts_lockfile = account_lockfile;
 
   return LCMAPS_MOD_SUCCESS;
 
