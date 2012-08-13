@@ -1,7 +1,7 @@
 Summary: Pool accounts plugin for the LCMAPS authorization framework
 Name: lcmaps-plugins-pool-accounts
 Version: 0.1
-Release: 1%{?dist}
+Release: 2%{?dist}
 License: Apache v2.0
 Group: System Environment/Libraries
 
@@ -34,14 +34,20 @@ rm $RPM_BUILD_ROOT/%{_libdir}/lcmaps/liblcmaps_pool_accounts.la
 rm $RPM_BUILD_ROOT/%{_libdir}/lcmaps/liblcmaps_pool_accounts.a
 mv $RPM_BUILD_ROOT%{_libdir}/lcmaps/liblcmaps_pool_accounts.so $RPM_BUILD_ROOT%{_libdir}/lcmaps/lcmaps_pool_accounts.mod
 
+mkdir -p $RPM_BUILD_ROOT/var/lock/%{name}
+
 %clean
 rm -rf $RPM_BUILD_ROOT
 
 %files
 %defattr(-,root,root,-)
 %{_libdir}/lcmaps/lcmaps_pool_accounts.mod
+%dir /var/lock/%{name}
 
 %changelog
+* Mon Aug 13 2012 Brian Bockelman <bbockelm@cse.unl.edu> - 0.1-2
+Have the RPM own the lock directory.
+
 * Sun Aug 12 2012 Brian Bockelman <bbockelm@cse.unl.edu> - 0.1-1
 - First version of pool account plugin.
 
