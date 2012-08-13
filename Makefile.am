@@ -35,7 +35,7 @@ liblcmaps_pool_accounts_la_LDFLAGS = -avoid-version
 install-data-hook:
 	( \
 	cd $(DESTDIR)$(plugindir); \
-	for mod in process_tracking; do \
+	for mod in pool_accounts; do \
 	    rm -f lcmaps_$$mod.mod; \
 	    ln -s liblcmaps_$$mod.so.0.0.0 lcmaps_$$mod.mod; \
 	done \
