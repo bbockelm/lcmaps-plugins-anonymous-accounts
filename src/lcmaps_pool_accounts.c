@@ -43,11 +43,6 @@ static char * lockdir = NULL;
 static int min_uid = UID_DEFAULT;
 static int max_uid = UID_DEFAULT;
 
-// Global - the current FD and location of the lockfile.
-// Other plugins will use the dynamic loader to find this symbol.
-int lcmaps_pool_accounts_fd = -1;
-char * lcmaps_pool_accounts_lockfile = NULL;
-
 // Open the directory, do basic permission checks.
 // Returns -1 on failure and an open FD on success
 static int open_lockdir() {
@@ -80,6 +75,56 @@ static int open_lockdir() {
     return -1;
   }
   return dir_fd;
+}
+
+// Do some basic (but fallible) sanity checks on the proposed account.
+//
+// Right now, iterate through /proc and verify there are no other processes
+// running under this account name.
+//
+// Return codes:
+//   -1: System issue; fail immediately.
+//    0: Account is OK, proceed.
+//    1: Account issue; try another account. 
+//
+static int check_account(int uid) {
+
+  DIR * dir = opendir("/proc");
+  struct dirent * dent;
+
+  if (dir == NULL) {
+    lcmaps_log(0, "%s: Unable to list /proc (errno=%d, %s).\n", logstr, errno, strerror(errno));
+    return -1;
+  }
+  int dir_fd = dirfd(dir);
+
+  do {
+    errno = 0;
+    if ((dent = readdir(dir)) != NULL) {
+      struct stat stat_buf;
+      if (fstatat(dir_fd, dent->d_name, &stat_buf, AT_SYMLINK_NOFOLLOW) == -1) {
+        if (errno == ENOENT) {
+          // Not fatal, as there is a race condition here (process exited after readdir but before fstatat).
+          lcmaps_log(4, "%s: Unable to fstat /proc/%s (errno=%d, %s); not fatal.\n", logstr, dent->d_name, errno, strerror(errno));
+          continue;
+        } else {
+          lcmaps_log(0, "%s: Unable to fstat /proc/%s (errno=%d, %s); fatal.\n", logstr, dent->d_name, errno, strerror(errno));
+          return -1;
+        }
+      }
+      if (stat_buf.st_uid == uid) {
+        lcmaps_log(1, "%s: Cannot use pool account UID %d as process %s is already running under that UID.\n", logstr, uid, dent->d_name);
+        return 1;
+      }
+    }
+  } while (dent != NULL);
+  if (errno != 0) {
+    lcmaps_log(1, "%s: Error while iterating through /proc: (errno=%d, %s)\n", logstr, errno, strerror(errno));
+    return -1;
+  }
+  closedir(dir);
+
+  return 0;
 }
 
 // Given a lock directory file descriptor, iterate through the possible
@@ -132,9 +177,21 @@ int select_account(int dir_fd, char **account_name, char **account_lockfile, int
       } else {
         lcmaps_log(2, "%s: Not assigning account %s because of error (errno=%d, %s).\n", logstr, name, errno, strerror(errno));
       }
+      close(fd);
       continue;
     } else if (excl_failed) {
       lcmaps_log(1, "%s: Locked an existing account file %s; likely means the monitoring process died unexpectedly or misconfiguration.\n", logstr, name);
+    }
+
+    int account_validity = check_account(uid);
+    if (account_validity == -1) {
+      lcmaps_log(0, "%s: Fatal error while checking account validity.\n", logstr);
+      close(fd);
+      return -1;
+    } else if (account_validity == 1) {
+      lcmaps_log(2, "%s: Grabbed the lock on account %s but it failed sanity checks; will try another.\n", logstr, name);
+      close(fd);
+      continue;
     }
 
     *account_name = strdup(name);
@@ -142,6 +199,7 @@ int select_account(int dir_fd, char **account_name, char **account_lockfile, int
     *account_lockfile = malloc(lockfile_len);
     if (!account_name || !account_lockfile) {
       lcmaps_log(0, "%s: Unable to allocate memory for account name.\n", logstr);
+      close(fd);
       return -1;
     }
     *account_uid = account->pw_uid;
@@ -167,8 +225,6 @@ Returns:
 int plugin_initialize(int argc, char **argv)
 {
   int idx;
-
-  lcmaps_pool_accounts_fd = -1;
 
   // Notice that we start at 1, as argv[0] is the plugin name.
   for (idx=1; idx<argc; idx++) {
@@ -290,8 +346,18 @@ int plugin_run(int argc, lcmaps_argument_t *argv)
   free(account_name);
   addCredentialData(UID, &account_uid);
   addCredentialData(PRI_GID, &account_gid);
-  lcmaps_pool_accounts_fd = new_fd;
-  lcmaps_pool_accounts_lockfile = account_lockfile;
+
+  size_t info_string_len = 10+1+strlen(account_lockfile);
+  char * info_string = malloc(info_string_len+1);
+  if (info_string == NULL) {
+    lcmaps_log_time(0, "%s: Failed to allocate memory for pool index string.\n", logstr);
+    goto select_account_failed;
+  }
+  if (snprintf(info_string, info_string_len, "%d:%s", new_fd, account_lockfile) >= info_string_len) {
+    lcmaps_log_time(0, "%s: Unable to create packed string.\n", logstr);
+    goto select_account_failed;
+  }
+  addCredentialData(POOL_INDEX, &info_string);
 
   return LCMAPS_MOD_SUCCESS;
 
