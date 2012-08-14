@@ -1,7 +1,7 @@
 Summary: Pool accounts plugin for the LCMAPS authorization framework
 Name: lcmaps-plugins-pool-accounts
-Version: 0.1
-Release: 2%{?dist}
+Version: 0.2
+Release: 1%{?dist}
 License: Apache v2.0
 Group: System Environment/Libraries
 
@@ -45,6 +45,9 @@ rm -rf $RPM_BUILD_ROOT
 %dir /var/lock/%{name}
 
 %changelog
+* Mon Aug 13 2012 Brian Bockelman <bbockelm@cse.unl.edu> - 0.2-1
+- Change hashing algorithm to something sticky per-job.
+
 * Mon Aug 13 2012 Brian Bockelman <bbockelm@cse.unl.edu> - 0.1-2
 Have the RPM own the lock directory.
 
