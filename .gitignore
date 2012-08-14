@@ -12,8 +12,8 @@ configure
 depcomp
 install-sh
 lcmaps-plugins-pool-accounts-*.tar.gz
-lcmaps_pool_accounts.lo
-lcmaps_pool_accounts.o
+*.lo
+*.o
 liblcmaps_pool_accounts.la
 libtool
 ltmain.sh

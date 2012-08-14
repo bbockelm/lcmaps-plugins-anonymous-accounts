@@ -25,6 +25,8 @@
 #include "lcmaps/lcmaps_cred_data.h"
 #include "lcmaps/lcmaps_arguments.h"
 
+#include "ancestry_hash.h"
+
 // Various necessary strings
 #define MINUID_ARG "-minuid"
 #define MAXUID_ARG "-maxuid"
@@ -77,65 +79,105 @@ static int open_lockdir() {
   return dir_fd;
 }
 
-// Do some basic (but fallible) sanity checks on the proposed account.
+// Given a UID and an open FD, see if we are allowed to use it.
 //
-// Right now, iterate through /proc and verify there are no other processes
-// running under this account name.
+// We can use it if there is no process hash or the existing hash matches
+// ours.
 //
-// Return codes:
-//   -1: System issue; fail immediately.
-//    0: Account is OK, proceed.
-//    1: Account issue; try another account. 
+// Returns 0 on success, -1 on failure, 1 if the account should not be used.
 //
-static int check_account(int uid) {
-
-  DIR * dir = opendir("/proc");
-  struct dirent * dent;
-
-  if (dir == NULL) {
-    lcmaps_log(0, "%s: Unable to list /proc (errno=%d, %s).\n", logstr, errno, strerror(errno));
+static int check_account(int uid, int fd, char **account_hash) {
+  FILE * file = fdopen(fd, "r");
+  if (file == NULL) {
+    lcmaps_log(0, "%s: Unable to allocate file pointer for account %d.\n", logstr, uid);
     return -1;
   }
-  int dir_fd = dirfd(dir);
+  rewind(file);
 
-  do {
-    errno = 0;
-    if ((dent = readdir(dir)) != NULL) {
-      struct stat stat_buf;
-      if (fstatat(dir_fd, dent->d_name, &stat_buf, AT_SYMLINK_NOFOLLOW) == -1) {
-        if (errno == ENOENT) {
-          // Not fatal, as there is a race condition here (process exited after readdir but before fstatat).
-          lcmaps_log(4, "%s: Unable to fstat /proc/%s (errno=%d, %s); not fatal.\n", logstr, dent->d_name, errno, strerror(errno));
-          continue;
-        } else {
-          lcmaps_log(0, "%s: Unable to fstat /proc/%s (errno=%d, %s); fatal.\n", logstr, dent->d_name, errno, strerror(errno));
-          return -1;
-        }
-      }
-      if (stat_buf.st_uid == uid) {
-        lcmaps_log(1, "%s: Cannot use pool account UID %d as process %s is already running under that UID.\n", logstr, uid, dent->d_name);
-        return 1;
-      }
+  int pid, ppid;
+  time_t timestamp;
+  lcmaps_log(5, "%s: Checking validity of UID %d.\n", logstr, uid);
+
+  // Compute our hash.
+  char * new_hash = getHash(getpid());
+  if (new_hash == NULL) {
+    lcmaps_log(0, "%s: Unable to compute hash for my current process.\n", logstr);
+    return -1;
+  }
+  *account_hash = new_hash;
+
+  // Look for an existing hash.  No hash means we can use the account.
+  int matches = fscanf(file, "%d:%d:%ld", &pid, &ppid, &timestamp);
+  if (matches != 3) {
+    lcmaps_log(5, "%s: Invalid hash string in lock file (%d matches), so we can reuse it.\n", logstr, matches);
+    return 0;
+  }
+
+  int mypid, myppid;
+  time_t mytimestamp;
+  if (sscanf(new_hash, "%d:%d:%ld", &mypid, &myppid, &mytimestamp) != 3) {
+    lcmaps_log(0, "%s: Incorrect format of new hash (%s).\n", logstr, new_hash);
+    return -1;
+  }
+
+  // If hash on-disk is the same as ours, we can reuse this account.
+  if ((mypid == pid) && (myppid == ppid) && (mytimestamp == timestamp)) {
+    lcmaps_log(5, "%s: On-disk hash matches in-memory one; using account.\n", logstr);
+    return 0;
+  }
+
+  // From here on out, we need to see if the hash on-disk is still valid.
+  // If it is not valid (process exited, information changes), return 0
+  // because we can reuse the account.
+  //
+  // If we determine the hash is still valid, we cannot use this account (return 1).
+
+  // Check to see if the process's birthday is still correct.
+  char proc_file[20];
+  if (snprintf(proc_file, 20, "/proc/%d",pid) >= 20) {
+    lcmaps_log(0, "%s: Unable to open file in proc due to large PID %d.\n", logstr, pid);
+    return 1;
+  }
+  lcmaps_log(5, "%s: Checking age of %s.\n", logstr, proc_file);
+  struct stat stat_buf;
+  if (stat(proc_file, &stat_buf) == -1) {
+    if (errno != ENOENT) {
+      lcmaps_log(0, "%s: Unable to stat %s to get creation timestamp.\n", logstr, proc_file);
+      return -1;
     }
-  } while (dent != NULL);
-  if (errno != 0) {
-    lcmaps_log(1, "%s: Error while iterating through /proc: (errno=%d, %s)\n", logstr, errno, strerror(errno));
-    return -1;
+    lcmaps_log(5, "%s: Re-using account because previous PID from hash disappeared.\n", logstr);
+    return 0;
   }
-  closedir(dir);
+  if (timestamp != stat_buf.st_mtime) {
+    lcmaps_log(5, "%s: Re-using account because PID birthday does not match on-disk hash.\n", logstr);
+    return 0;
+  }
 
-  return 0;
+  int real_ppid;
+  if (getParentIDs(pid, &real_ppid, NULL, NULL)) {
+    lcmaps_log(0, "%s: Unable to retrieve parent of process %d.\n", logstr, pid);
+    return 0;
+  }
+
+  if (real_ppid != ppid) {
+    lcmaps_log(5, "%s: Re-using account because PPID (%d) changed for PID %d from on-disk hash (%d).\n", logstr, real_ppid, pid, ppid);
+    return 0;
+  }
+
+  // Hash is still valid, and it does not match ours.  Try again.
+  lcmaps_log(5, "%s: Cannot re-use account - hash is still valid, and it does not match ours.\n", logstr);
+  return 1;
 }
 
 // Given a lock directory file descriptor, iterate through the possible
 // user names and select an unlocked account.
 //
-// On success, account_name and account_lockfile are changed to the name and
-// location of the lockfile, respectively.  The callee is responsible for
+// On success, account_name, hash and lockfile are changed to the name, hash
+// and location of the lockfile, respectively.  The callee is responsible for
 // calling 'free' on the memory.
 //
 // Return -1 on failure.
-int select_account(int dir_fd, char **account_name, char **account_lockfile, int *account_uid, int *account_gid) {
+int select_account(int dir_fd, char **account_name, char **account_lockfile, char **account_hash, int *account_uid, int *account_gid) {
 
   struct passwd *account;
   int uid;
@@ -152,11 +194,11 @@ int select_account(int dir_fd, char **account_name, char **account_lockfile, int
     }
     const char * name = account->pw_name;
     lcmaps_log(4, "%s: Considering mapping to account %s.\n", logstr, name);
-    int fd = openat(dir_fd, name, O_WRONLY|O_CREAT|O_EXCL, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
+    int fd = openat(dir_fd, name, O_RDWR|O_CREAT|O_EXCL, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
     if (fd == -1) {
       if (errno == EEXIST) {
         excl_failed = 1;
-        fd = openat(dir_fd, name, O_WRONLY, 0);
+        fd = openat(dir_fd, name, O_RDWR, 0);
         if (fd == -1) {
           if (errno == ENOENT) {
             lcmaps_log(2, "%s: Race issue when trying to lock %s; trying another account.\n", logstr, name);
@@ -180,16 +222,17 @@ int select_account(int dir_fd, char **account_name, char **account_lockfile, int
       close(fd);
       continue;
     } else if (excl_failed) {
-      lcmaps_log(1, "%s: Locked an existing account file %s; likely means the monitoring process died unexpectedly or misconfiguration.\n", logstr, name);
+      // Per new hashing scheme, this isn't necessary.
+      //lcmaps_log(1, "%s: Locked an existing account file %s; likely means the monitoring process died unexpectedly or misconfiguration.\n", logstr, name);
     }
 
-    int account_validity = check_account(uid);
+    int account_validity = check_account(uid, fd, account_hash);
     if (account_validity == -1) {
       lcmaps_log(0, "%s: Fatal error while checking account validity.\n", logstr);
       close(fd);
       return -1;
     } else if (account_validity == 1) {
-      lcmaps_log(2, "%s: Grabbed the lock on account %s but it failed sanity checks; will try another.\n", logstr, name);
+      lcmaps_log(4, "%s: Tried account %s but it appears it is in use; will try another.\n", logstr, name);
       close(fd);
       continue;
     }
@@ -228,7 +271,7 @@ int plugin_initialize(int argc, char **argv)
 
   // Notice that we start at 1, as argv[0] is the plugin name.
   for (idx=1; idx<argc; idx++) {
-    lcmaps_log(2, "%s: arg %d is %s\n", logstr, idx, argv[idx]);
+    lcmaps_log(5, "%s: arg %d is %s\n", logstr, idx, argv[idx]);
     if ((strncasecmp(argv[idx], MINUID_ARG, strlen(MINUID_ARG)) == 0) && ((idx+1) < argc)) {
       idx++;
       if ((sscanf(argv[idx], "%d", &min_uid) != 1) || (min_uid < 0)) {
@@ -282,7 +325,7 @@ int plugin_initialize(int argc, char **argv)
     return LCMAPS_MOD_FAIL;
   }
 
-  lcmaps_log(3, "%s: UID pool range: %d-%d, inclusive.\n", logstr, min_uid, max_uid);
+  lcmaps_log(5, "%s: UID pool range: %d-%d, inclusive.\n", logstr, min_uid, max_uid);
 
   return LCMAPS_MOD_SUCCESS;
 
@@ -334,10 +377,10 @@ int plugin_run(int argc, lcmaps_argument_t *argv)
   }
 
   char * account_name = NULL;
-  char * account_lockfile = NULL;
+  char * account_hash = NULL, *account_lock = NULL;
   int account_uid = -1;
   int account_gid = -1;
-  int new_fd = select_account(dir_fd, &account_name, &account_lockfile, &account_uid, &account_gid);
+  int new_fd = select_account(dir_fd, &account_name, &account_lock, &account_hash, &account_uid, &account_gid);
   if (new_fd == -1) {
     goto select_account_failed;
   }
@@ -347,20 +390,42 @@ int plugin_run(int argc, lcmaps_argument_t *argv)
   addCredentialData(UID, &account_uid);
   addCredentialData(PRI_GID, &account_gid);
 
-  size_t info_string_len = 10+1+strlen(account_lockfile);
-  char * info_string = malloc(info_string_len+1);
-  if (info_string == NULL) {
-    lcmaps_log_time(0, "%s: Failed to allocate memory for pool index string.\n", logstr);
-    goto select_account_failed;
+  if (ftruncate(new_fd, 0) == -1) {
+    lcmaps_log(0, "%s: Unable to truncate lock file (errno=%d, %s).\n", logstr, errno, strerror(errno));
+    goto truncate_failed;
   }
-  if (snprintf(info_string, info_string_len, "%d:%s", new_fd, account_lockfile) >= info_string_len) {
-    lcmaps_log_time(0, "%s: Unable to create packed string.\n", logstr);
-    goto select_account_failed;
+
+  int nleft, nwritten;
+  nleft = strlen(account_hash);
+  lcmaps_log(5, "%s: Will write the following to the lockfile %s: %s (len %d)\n", logstr, account_lock, account_hash, strlen(account_hash));
+  lseek(new_fd, 0, SEEK_SET);
+  char * ptr = account_hash;
+  while (nleft > 0) {
+    nwritten = write(new_fd, ptr, nleft);
+    if (nwritten < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      lcmaps_log(0, "%s: Error when writing into the lockfile %s (errno=%d, %s).\n", logstr, account_lock, errno, strerror(errno));
+      goto write_failed;
+    }
+    nleft -= nwritten;
+    ptr += nwritten;
   }
-  addCredentialData(POOL_INDEX, &info_string);
+  close(new_fd);
+  close(dir_fd);
+  if (account_lock) free(account_lock);
+  if (account_hash) free(account_hash);
 
   return LCMAPS_MOD_SUCCESS;
 
+write_failed:
+  if (account_lock)
+    unlink(account_lock);
+truncate_failed:
+  close(new_fd);
+  if (account_lock) free(account_lock);
+  if (account_hash) free(account_hash);
 select_account_failed:
   close(dir_fd);
 opendir_failed:
