@@ -1,3 +1,54 @@
 
 A LCMAPS plugin which assigns UIDs from a pool of accounts.
 
+This plugin will map a user to a UID in a pool of accounts.  It is designed
+so it will provide a stable mapping for each batch system job without requiring
+an authorization.
+
+In other words, if a single "glexec" invocation maps to the user "foo", then
+all future invocations of glexec by that batch job will also map to user "foo".
+
+The job will not map two batch system jobs to the same account if they are both
+running at the same time.  It will work recursively.  If the pool runs out of
+accounts, the plugin will fail.
+
+The plugin does not require any particular authorization to run.  That is, it
+will map any certificate to an account.  The idea is this will allow glexec to
+provide user separation without authorization.
+
+An example lcmaps configuration file is:
+"""
+gumsclient = "lcmaps_gums_client.mod"
+             "-resourcetype ce"
+             "-actiontype execute-now"
+             "-capath /etc/grid-security/certificates"
+             "--endpoint https://gums.example.com:8443/gums/services/GUMSXACMLAuthorizationServicePort"
+
+verifyproxy = "lcmaps_verify_proxy.mod"
+          "--allow-limited-proxy"
+          " -certdir /etc/grid-security/certificates"
+
+tracking = "lcmaps_process_tracking.mod"
+
+poolaccount = "lcmaps_pool_accounts.mod"
+                "-minuid 1761"
+                "-maxuid 1790"
+
+glexec:
+verifyproxy -> gumsclient
+gumsclient -> tracking | poolaccount
+poolaccount -> tracking
+
+"""
+
+A site will need to change the endpoint URL for the gumsclient module and the
+the min/max UID for the poolaccount module.
+
+A sample invocation would be:
+
+X509_USER_PROXY=/path/to/pilot_proxy GLEXEC_CLIENT_CERT=/path/to/client_proxy \
+/usr/sbin/glexec `which whoami`
+
+The invocation assumes "gumsclient" will deny the payload's proxy and invoke
+the poolaccount module to provide the UID from the account pool.
+
