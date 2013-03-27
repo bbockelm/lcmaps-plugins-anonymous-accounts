@@ -11,7 +11,7 @@ config.sub
 configure
 depcomp
 install-sh
-lcmaps-plugins-pool-accounts-*.tar.gz
+lcmaps-plugins-anonymous-accounts-*.tar.gz
 *.lo
 *.o
 liblcmaps_anonymous_accounts.la
