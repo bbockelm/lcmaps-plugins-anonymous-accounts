@@ -22,22 +22,22 @@ AM_CXXFLAGS = \
 	-Wp,-D_FORTIFY_SOURCE=2 \
 	$(CXX0X_CFLAGS)
 
-EXTRA_DIST = bootstrap lcmaps-plugins-pool-accounts.spec
+EXTRA_DIST = bootstrap lcmaps-plugins-anonymous-accounts.spec
 
 plugindir = $(MODULEDIR)
 plugin_LTLIBRARIES = \
-        liblcmaps_pool_accounts.la
-liblcmaps_pool_accounts_la_SOURCES = \
-	src/lcmaps_pool_accounts.c \
+        liblcmaps_anonymous_accounts.la
+liblcmaps_anonymous_accounts_la_SOURCES = \
+	src/lcmaps_anonymous_accounts.c \
 	src/ancestry_hash.cxx \
 	src/ancestry_hash.h
 
-liblcmaps_pool_accounts_la_LDFLAGS = -avoid-version
+liblcmaps_anonymous_accounts_la_LDFLAGS = -avoid-version
 
 install-data-hook:
 	( \
 	cd $(DESTDIR)$(plugindir); \
-	for mod in pool_accounts; do \
+	for mod in anonymous_accounts; do \
 	    rm -f lcmaps_$$mod.mod; \
 	    ln -s liblcmaps_$$mod.so.0.0.0 lcmaps_$$mod.mod; \
 	done \

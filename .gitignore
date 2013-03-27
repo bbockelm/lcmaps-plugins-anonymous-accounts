@@ -14,10 +14,11 @@ install-sh
 lcmaps-plugins-pool-accounts-*.tar.gz
 *.lo
 *.o
-liblcmaps_pool_accounts.la
+liblcmaps_anonymous_accounts.la
 libtool
 ltmain.sh
 missing
 src/config.h
 src/config.h.in~
 src/stamp-h1
+m4

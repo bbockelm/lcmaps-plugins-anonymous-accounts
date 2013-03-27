@@ -24,6 +24,8 @@
 #include <errno.h>
 #include <dirent.h>
 
+#include "config.h"
+
 #ifdef HAVE_UNORDERED_MAP
 #include <unordered_map>
 #else
