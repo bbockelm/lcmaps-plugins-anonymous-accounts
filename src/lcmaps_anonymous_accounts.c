@@ -84,7 +84,8 @@ static int open_lockdir() {
 // We can use it if there is no process hash or the existing hash matches
 // ours.
 //
-// Returns 0 on success, -1 on failure, 1 if the account should not be used.
+// Returns 0 if account is available, -1 on failure, 1 if the account should not be used,
+// and 2 if the account matches this process
 //
 static int check_account(int uid, int fd, char **account_hash) {
   FILE * file = fdopen(fd, "r");
@@ -123,7 +124,7 @@ static int check_account(int uid, int fd, char **account_hash) {
   // If hash on-disk is the same as ours, we can reuse this account.
   if ((mypid == pid) && (myppid == ppid) && (mytimestamp == timestamp)) {
     lcmaps_log(5, "%s: On-disk hash matches in-memory one; using account.\n", logstr);
-    return 0;
+    return 2;
   }
 
   // From here on out, we need to see if the hash on-disk is still valid.
@@ -168,6 +169,8 @@ int select_account(int dir_fd, char **account_name, char **account_lockfile, cha
 
   struct passwd *account;
   int uid;
+  unsigned pass;
+  for (pass=0; pass < 2; pass++)
   for (uid = min_uid; uid <= max_uid; uid++) {
     int excl_failed = 0;
     errno = 0; // errno set to 0 explicitly per comments in man page of getpwuid.
@@ -221,6 +224,8 @@ int select_account(int dir_fd, char **account_name, char **account_lockfile, cha
     } else if (account_validity == 1) {
       lcmaps_log(4, "%s: Tried account %s but it appears it is in use; will try another.\n", logstr, name);
       close(fd);
+      continue;
+    } else if ((account_validity == 0) && (pass == 0)) {
       continue;
     }
 
