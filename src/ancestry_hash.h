@@ -10,6 +10,7 @@ extern "C" {
 
 char * getHash(pid_t);
 int getParentIDs(pid_t, pid_t*, uid_t*, gid_t*);
+unsigned long long getProcessBirthday(pid_t);
 
 #ifdef __cplusplus
 }

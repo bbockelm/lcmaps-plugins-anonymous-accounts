@@ -151,6 +151,29 @@ finalize:
 
 }
 
+extern "C"
+{
+unsigned long long
+getProcessBirthday(pid_t pid)
+{
+    char fixed_string[50];
+    if (snprintf(fixed_string, 50, "/proc/%d/stat", pid) >= 50)
+    {
+        return 0;
+    }
+    FILE *file = fopen(fixed_string, "r");
+    if (!file) return 0;
+    unsigned long long tmp_proc_time;
+    int ret = fscanf(file, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %*u %*u %*d %*d %*d %*d %*d %*d %llu",
+        &tmp_proc_time);
+    fclose(file);
+    if (ret == 1) {
+        return tmp_proc_time;
+    }
+    return 0;
+}
+}
+
 // From a PID / PPID, create a unique hash, including the PID's creation timestamp.
 // The callee is responsible for 'free'ing the memory returned.
 // If this function returns NULL, it has encountered a fatal error.
@@ -160,19 +183,20 @@ static char * create_hash(pid_t pid, pid_t ppid) {
         lcmaps_log(0, "%s: Unable to open file in proc due to large PID %d.\n", logstr, pid);
         return NULL;
     }
-    struct stat stat_buf;
-    if (stat(proc_file, &stat_buf) == -1) {
-        lcmaps_log(0, "%s: Unable to stat %s to get creation timestamp.\n", logstr, proc_file);
+    unsigned long long bday;
+    if ((bday = getProcessBirthday(pid)) == 0)
+    {
+        lcmaps_log(0, "%s: Unable to get process %d birthday.\n", logstr, pid);
         return NULL;
     }
     char fixed_string[50];
-    int necessary_size = snprintf(fixed_string, 50, "%d:%d:%ld", pid, ppid, stat_buf.st_mtime);
+    int necessary_size = snprintf(fixed_string, 50, "%d:%d:%llu", pid, ppid, bday);
     char * result = (char *)malloc(necessary_size+1);
     if (result == NULL) {
         lcmaps_log(0, "%s: Unable to allocate final string for the hash function.\n", logstr);
         return NULL;
     }
-    if (snprintf(result, necessary_size+1, "%d:%d:%ld", pid, ppid, stat_buf.st_mtime) >= necessary_size+1) {
+    if (snprintf(result, necessary_size+1, "%d:%d:%llu", pid, ppid, bday) >= necessary_size+1) {
         lcmaps_log(0, "%s: Logic error in create_hash.\n", logstr);
         return NULL;
     }

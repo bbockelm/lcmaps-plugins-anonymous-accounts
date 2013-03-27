@@ -32,13 +32,13 @@
 #define MAXUID_ARG "-maxuid"
 #define UID_DEFAULT -1
 #define LOCKPATH_ARG "-lockpath"
-#define LOCKPATH_DEFAULT "/var/lock/lcmaps-plugins-pool-accounts"
+#define LOCKPATH_DEFAULT "/var/lock/lcmaps-plugins-anonymous-accounts"
 
 // Refuse to hand out a UID lower than this one.
 // Selection of 1000 is done based on current (2012) RHEL guidelines.
 #define SYSTEM_UID 1000
 
-const char * logstr = "lcmaps-pool-accounts";
+const char * logstr = "lcmaps-anonymous-accounts";
 
 // Plugin configurations
 static char * lockdir = NULL;
@@ -95,7 +95,7 @@ static int check_account(int uid, int fd, char **account_hash) {
   rewind(file);
 
   int pid, ppid;
-  time_t timestamp;
+  unsigned long long timestamp;
   lcmaps_log(5, "%s: Checking validity of UID %d.\n", logstr, uid);
 
   // Compute our hash.
@@ -107,15 +107,15 @@ static int check_account(int uid, int fd, char **account_hash) {
   *account_hash = new_hash;
 
   // Look for an existing hash.  No hash means we can use the account.
-  int matches = fscanf(file, "%d:%d:%ld", &pid, &ppid, &timestamp);
+  int matches = fscanf(file, "%d:%d:%llu", &pid, &ppid, &timestamp);
   if (matches != 3) {
     lcmaps_log(5, "%s: Invalid hash string in lock file (%d matches), so we can reuse it.\n", logstr, matches);
     return 0;
   }
 
   int mypid, myppid;
-  time_t mytimestamp;
-  if (sscanf(new_hash, "%d:%d:%ld", &mypid, &myppid, &mytimestamp) != 3) {
+  unsigned long long mytimestamp;
+  if (sscanf(new_hash, "%d:%d:%llu", &mypid, &myppid, &mytimestamp) != 3) {
     lcmaps_log(0, "%s: Incorrect format of new hash (%s).\n", logstr, new_hash);
     return -1;
   }
@@ -133,22 +133,9 @@ static int check_account(int uid, int fd, char **account_hash) {
   // If we determine the hash is still valid, we cannot use this account (return 1).
 
   // Check to see if the process's birthday is still correct.
-  char proc_file[20];
-  if (snprintf(proc_file, 20, "/proc/%d",pid) >= 20) {
-    lcmaps_log(0, "%s: Unable to open file in proc due to large PID %d.\n", logstr, pid);
-    return 1;
-  }
-  lcmaps_log(5, "%s: Checking age of %s.\n", logstr, proc_file);
-  struct stat stat_buf;
-  if (stat(proc_file, &stat_buf) == -1) {
-    if (errno != ENOENT) {
-      lcmaps_log(0, "%s: Unable to stat %s to get creation timestamp.\n", logstr, proc_file);
-      return -1;
-    }
-    lcmaps_log(5, "%s: Re-using account because previous PID from hash disappeared.\n", logstr);
-    return 0;
-  }
-  if (timestamp != stat_buf.st_mtime) {
+  lcmaps_log(5, "%s: Checking age of %d.\n", logstr, pid);
+  unsigned long long proc_bday = getProcessBirthday(pid);
+  if (timestamp != proc_bday) {
     lcmaps_log(5, "%s: Re-using account because PID birthday does not match on-disk hash.\n", logstr);
     return 0;
   }
@@ -314,7 +301,7 @@ int plugin_initialize(int argc, char **argv)
     lcmaps_log(0, "%s: %s argument is not set!\n", logstr, MAXUID_ARG);
     return LCMAPS_MOD_FAIL;
   }
-  if (min_uid <= SYSTEM_UID) {
+  if (min_uid < SYSTEM_UID) {
     lcmaps_log(0, "%s: %s argument cannot be less than %d to avoid possible"
       " system accounts.\n", logstr, MINUID_ARG, SYSTEM_UID);
     return LCMAPS_MOD_FAIL;
